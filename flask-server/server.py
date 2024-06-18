@@ -1,61 +1,164 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import google.generativeai as genai
+import re
+import os
+import logging
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}})
+CORS(app)
 
-# Your Gemini API key
+logging.basicConfig(level=logging.DEBUG)
 GEMINI_API_KEY = 'AIzaSyCclRMJ0cdftV0xAhHS7yPEyMWbc3TZtPs'
-
-products_schema = [
-    {
-        "Product_name": "Eco-friendly Water Bottle",
-        "Product_description": "A reusable water bottle made from stainless steel, featuring double-wall insulation to keep beverages hot or cold for hours.",
-        "Reason": "Chosen for its environmental benefits and the growing consumer preference for sustainable products."
-    },
-    # Add other products here...
-]
-
-# Initialize the Gemini API client
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel('gemini-1.0-pro')
 
+all_gift_ideas = []
+
+
+
 @app.route('/generate_gift_idea', methods=['POST'])
 def generate_gift_idea():
-    data = request.json
-    age = data.get('age')
-    gender = data.get('gender')
-    occasion = data.get('occasion')
-    recipient_type = data.get('recipient_type')
-    prompt = f"You have a very good choice, so just provide me a list of 12 highly-rated and trending different gift ideas for a {age}-year-old {recipient_type} who is {gender} and loves electronic items. These gifts should be suitable for {occasion} and available on Amazon India. Ensure that each product followed by only its product_names, description of each product, each product followed by its description and a convincing reason for its selection and ensure that product are listed without any special characters such as *, here{products_schema} is an example with three products with its Product_name:, Description:, Reason_for_selection :, similarly do that for all 12 product."
-    
     try:
-        response = model.generate_content(prompt)
-        generated_text = response.text
-        gift_ideas = process_text_for_gift_ideas(generated_text)[:12]
-        return jsonify({"gift_ideas": gift_ideas})
+        data = request.json
+        logging.debug(f"Received data for generating gift idea: {data}")
+
+        age = data.get('age', '')
+        gender = data.get('gender', '')
+        occasion = data.get('occasion', '')
+        recipient_type = data.get('recipient_type', '')
+        categories = data.get('categories', [])
+        price_range = data.get('price_range', '')
+        prompt = data.get('prompt', '')
+        if prompt:
+            prompt_text = create_search_prompt(prompt)
+        else:
+            prompt_text = create_prompt(age, gender, occasion, recipient_type, categories, price_range)
+        logging.debug(f"Generated prompt: {prompt_text}")
+
+        response = model.generate_content(prompt_text)
+        logging.debug(f"Model response: {response}")
+
+        cleaned_text = clean_text(response.text)
+        logging.debug(f"Cleaned response text: {cleaned_text}")
+
+        gift_ideas = process_and_structure_gift_ideas(cleaned_text)
+        logging.debug(f"Processed gift ideas: {gift_ideas}")
+        
+        # Filter out duplicate gift ideas
+        unique_gift_ideas = filter_unique_gift_ideas(gift_ideas)
+        logging.debug(f"Unique gift ideas: {unique_gift_ideas}")
+        
+        # Append unique gift ideas to the global list of all gift ideas
+        all_gift_ideas.extend(unique_gift_ideas)
+        logging.debug(f"Updated global gift ideas list: {all_gift_ideas}")
+
+        return jsonify({"gift_ideas": unique_gift_ideas})
     except Exception as e:
-        print(f"Error generating gift ideas: {e}")
+        logging.error(f"Error generating gift ideas: {e}", exc_info=True)
         return jsonify({"error": "Error generating gift ideas"}), 500
 
-@app.route('/search_gift_idea', methods=['POST'])
-def search_gift_idea():
-    data = request.json
-    textdata = data.get('prompt')
-    prompt = f"Task: Gift idea generation\nDescription: Based on {textdata} generate gift idea suggestions that are available on Amazon India ecommerce website. Ensure that only the product names, descriptions, and reason is provided as example in schema {products_schema}. Additionally, include each product followed by its description and a convincing reason for its selection. Provide me the output in the format:\nProduct:\nDescription:\nReason:"
 
+
+@app.route('/generate_more_gift_ideas', methods=['POST'])
+def generate_more_ideas():
     try:
-        response = model.generate_content(prompt)
-        generated_text = response.text
-        gift_ideas = process_text_for_gift_ideas(generated_text)[:12]
-        return jsonify({"gift_ideas": gift_ideas})
+        # Generate more gift ideas based on the existing criteria
+        response = generate_gift_idea()
+        return response
     except Exception as e:
-        print(f"Error generating gift ideas: {e}")
-        return jsonify({"error": "Error generating gift ideas"}), 500
+        logging.error(f"Error generating more gift ideas: {e}", exc_info=True)
+        return jsonify({"error": "Error generating more gift ideas"}), 500
 
-def process_text_for_gift_ideas(text):
-    return text.split('\n')[:12]
+def create_prompt(age, gender, occasion, recipient_type, categories, price_range):
+    prompt_parts = ["You are an expert in finding gifts for Indian people. Provide me a list of 9 popular and trending different products that can be searched using the product name. Each product should include the detailed product name, company, model, and price."]
+
+    if age:
+        prompt_parts.append(f"for a {age}-year-old")
+    if recipient_type:
+        prompt_parts.append(recipient_type)
+    if gender:
+        prompt_parts.append(f"who is {gender}")
+    if categories:
+        categories_str = ', '.join(categories)
+        prompt_parts.append(f"and loves {categories_str} items")
+    if occasion:
+        prompt_parts.append(f"suitable for {occasion}")
+    if price_range:
+        prompt_parts.append(f"within the price range {price_range}")
+
+    prompt_parts.append("These gifts should be popular among Indian people and available on e-commerce websites like Amazon India. Ensure that each product is followed by its detailed product name, company, model, price, and a convincing reason for its selection. Ensure that the products are listed without any special characters such as *, -, or numbering. Here is an example:")
+    prompt_parts.append("Product_name: RVA Cute Flower Shaped Floor Cushion for Kids Room Living Room, Bedroom Furnishing Velvet Throw Pillow Cushion for Home Decoration Kids Girls Women Gift (Size 35 Cm) (Pink)")
+    prompt_parts.append("Reason: Chosen for its cute design, suitable for kids and home decoration, and its popularity on Indian e-commerce sites. Always give output in this output in format of")
+    prompt_parts.append("Product_name:\nReason:\n" + 
+                        "Product_name:\nReason:\n" + 
+                        "Product_name:\nReason:\n" +
+                        "Product_name:\nReason:\n" +
+                        "Product_name:\nReason:\n" +
+                        "Product_name:\nReason:\n" +
+                        "Product_name:\nReason:\n" +
+                        "Product_name:\nReason:\n" +
+                        "Product_name:\nReason:\n")
+    prompt_parts.append("Generate 9 products with detailed product name, company, model, price, and reason for selection as a gift idea. Each reason should be just below the product name.")
+
+    return ' '.join(prompt_parts)
+
+def create_search_prompt(textdata):
+    return (
+        f"You are an expert in finding gifts for Indian people. Based on the following input: '{textdata}', provide me with a list of 9 popular and trending products in India that would make excellent gifts for Indian people. "
+        f"These products should be available for purchase on major Indian e-commerce websites like Amazon India. Ensure that the list includes detailed product names, company, model, price, followed by a convincing reason for selecting each product as a gift idea. "
+        f"The reason should explain why the product is a good gift for Indian consumer. Provide the output in the following format:\n\n"
+        f"Product_name:\nReason:\n" +
+        f"Product_name:\nReason:\n" +
+        f"Product_name:\nReason:\n" +
+        f"Product_name:\nReason:\n" +
+        f"Product_name:\nReason:\n" +
+        f"Product_name:\nReason:\n" +
+        f"Product_name:\nReason:\n" +
+        f"Product_name:\nReason:\n" +
+        f"Product_name:\nReason:\n" +
+        f"Here is an example:\n"
+        f"Product_name: RVA Cute Flower Shaped Floor Cushion for Kids Room Living Room, Bedroom Furnishing Velvet Throw Pillow Cushion for Home Decoration Kids Girls Women Gift (Size 35 Cm) (Pink)\n"
+        f"Reason: Chosen for its cute design, suitable for kids and home decoration, and its popularity on Indian e-commerce sites."
+    )
+
+def filter_unique_gift_ideas(new_gift_ideas):
+    # Filter out any duplicate gift ideas from the new list
+    unique_gift_ideas = []
+    for idea in new_gift_ideas:
+        if idea not in all_gift_ideas:
+            unique_gift_ideas.append(idea)
+    return unique_gift_ideas
+
+def clean_text(text):
+    # Remove any asterisks, numbering, or unwanted characters
+    text = re.sub(r'[*-]', '', text)
+    text = re.sub(r'\d+\.\s*', '', text)  # Remove numbering (e.g., "1. ", "2. ", etc.)
+    return text
+
+def process_and_structure_gift_ideas(text):
+    gift_ideas = []
+    current_gift = {}
+
+    for line in text.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+
+        if "Product_name:" in line:
+            if current_gift:
+                gift_ideas.append(current_gift)
+                current_gift = {}
+            current_gift["Product_name"] = line.replace("Product_name:", "").strip()
+        elif "Reason:" in line:
+            current_gift["Reason"] = line.replace("Reason:", "").strip()
+        elif "Price:" in line:
+            current_gift["Price"] = line.replace("Price:", "").strip()
+
+    if current_gift:
+        gift_ideas.append(current_gift)
+
+    return gift_ideas
 
 if __name__ == '__main__':
     app.run(debug=True)
